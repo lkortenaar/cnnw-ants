@@ -16,7 +16,17 @@ TURN_SPEED = 0.4          # How sharply they turn
 RANDOM_STRENGTH = 0.3    # Random wobble (probability factor)
 DECAY_RATE = 0.65         # How fast trails vanish
 CHAOS_RATE = 0.01   # 1% chance to change direction randomly
-DASH_DIST = 10 
+DASH_DIST = 10
+
+# --- PREDATOR CONFIGURATION ---
+ENABLE_PREDATORS = True    # Toggle predator system
+NUM_PREDATORS = 1         # Number of predator agents
+PREDATOR_SPEED = 0.5       # Movement speed multiplier
+PREDATOR_SENSOR_DIST = 15  # How far predators sense ants
+PREDATOR_TURN_SPEED = 0.3  # Turn rate
+NEGATIVE_PHEROMONE = -100.0  # Strength of repellent trail
+NEGATIVE_DECAY = 0.3       # How fast negative pheromones fade
+REPULSION_STRENGTH = 0.8   # How much ants avoid negative pheromones
 
 class AntColony:
     def __init__(self, num_ants, width, height):
@@ -57,12 +67,66 @@ class AntColony:
 
         # The Pheromone Grid (Environment)
         self.grid = np.zeros((width, height))
+
+        # --- PREDATOR INITIALIZATION ---
+        if ENABLE_PREDATORS:
+            self.num_predators = NUM_PREDATORS
+            # Spawn predators randomly
+            self.pred_x = np.random.rand(NUM_PREDATORS) * width
+            self.pred_y = np.random.rand(NUM_PREDATORS) * height
+            self.pred_angle = np.random.rand(NUM_PREDATORS) * 2 * np.pi
+
     # Helper to sample grid safely (wrapping around edges)
     def get_sensor_values(self, x_arr, y_arr):
             # Clip coordinates to grid size
             ix = np.clip(x_arr.astype(int), 0, self.width - 1)
             iy = np.clip(y_arr.astype(int), 0, self.height - 1)
             return self.grid[ix, iy]
+
+    def update_predators(self):
+        """Update predator agents - they chase ant pheromones"""
+        if not ENABLE_PREDATORS:
+            return
+
+        # Sense for positive pheromones (ants)
+        cx = self.pred_x + np.cos(self.pred_angle) * PREDATOR_SENSOR_DIST
+        cy = self.pred_y + np.sin(self.pred_angle) * PREDATOR_SENSOR_DIST
+
+        lx = self.pred_x + np.cos(self.pred_angle - SENSOR_ANGLE) * PREDATOR_SENSOR_DIST
+        ly = self.pred_y + np.sin(self.pred_angle - SENSOR_ANGLE) * PREDATOR_SENSOR_DIST
+
+        rx = self.pred_x + np.cos(self.pred_angle + SENSOR_ANGLE) * PREDATOR_SENSOR_DIST
+        ry = self.pred_y + np.sin(self.pred_angle + SENSOR_ANGLE) * PREDATOR_SENSOR_DIST
+
+        # Only look at POSITIVE pheromones (ant trails)
+        c_val = np.maximum(0, self.get_sensor_values(cx, cy))
+        l_val = np.maximum(0, self.get_sensor_values(lx, ly))
+        r_val = np.maximum(0, self.get_sensor_values(rx, ry))
+
+        # Turn toward highest pheromone
+        forward_mask = (c_val > l_val) & (c_val > r_val)
+        turn_mask = ~forward_mask
+
+        if np.any(turn_mask):
+            turn_dir = (r_val[turn_mask] > l_val[turn_mask]).astype(float)
+            turn_dir = turn_dir * 2 - 1
+            self.pred_angle[turn_mask] += turn_dir * PREDATOR_TURN_SPEED
+
+        # Add some randomness
+        self.pred_angle += (np.random.rand(self.num_predators) - 0.5) * 0.2
+
+        # Move
+        self.pred_x += np.cos(self.pred_angle) * PREDATOR_SPEED
+        self.pred_y += np.sin(self.pred_angle) * PREDATOR_SPEED
+
+        # Wrap
+        self.pred_x = self.pred_x % self.width
+        self.pred_y = self.pred_y % self.height
+
+        # Deposit NEGATIVE pheromones
+        ix = self.pred_x.astype(int)
+        iy = self.pred_y.astype(int)
+        self.grid[ix, iy] += NEGATIVE_PHEROMONE
     def update(self):
         """The core simulation step."""
         
@@ -85,6 +149,25 @@ class AntColony:
         c_val = self.get_sensor_values(cx, cy)
         l_val = self.get_sensor_values(lx, ly)
         r_val = self.get_sensor_values(rx, ry)
+
+        # --- REPULSION FROM NEGATIVE PHEROMONES ---
+        if ENABLE_PREDATORS:
+            # If sensing negative pheromones, AVOID them
+            # Turn away from the most negative direction
+            negative_mask = (c_val < 0) | (l_val < 0) | (r_val < 0)
+
+            if np.any(negative_mask):
+                # Find which direction is LEAST negative (or most positive)
+                # Turn AWAY from the most negative sensor
+                repel_left = l_val[negative_mask] < r_val[negative_mask]
+                repel_right = ~repel_left
+
+                # Turn away (opposite of attraction)
+                repel_dir = np.zeros(np.sum(negative_mask))
+                repel_dir[repel_left] = 1  # Turn right to avoid left
+                repel_dir[repel_right] = -1  # Turn left to avoid right
+
+                self.angle[negative_mask] += repel_dir * TURN_SPEED * REPULSION_STRENGTH
 
         # --- B. DECISION LOGIC (Probabilistic + Momentum) ---
         # 1. Forward condition: Center > Left and Center > Right
@@ -149,7 +232,16 @@ class AntColony:
         self.grid = scipy.ndimage.gaussian_filter(self.grid, sigma=1)
         
         # 2. Decay - Old trails vanish
-        self.grid *= DECAY_RATE
+        if ENABLE_PREDATORS:
+            # Positive pheromones decay normally
+            positive_mask = self.grid > 0
+            self.grid[positive_mask] *= DECAY_RATE
+
+            # Negative pheromones decay faster
+            negative_mask = self.grid < 0
+            self.grid[negative_mask] *= NEGATIVE_DECAY
+        else:
+            self.grid *= DECAY_RATE
 
 
 def main():
@@ -179,32 +271,53 @@ def main():
                     colony.grid.fill(0)
 
         # 2. Simulation Step
+        if ENABLE_PREDATORS:
+            colony.update_predators()
         colony.update()
         colony.diffuse()
 
         # 3. Visualization
-        if show_visuals:
-                    # 1. Normalize the grid for the colormap (0.0 to 1.0)
-                    # using a power law to boost faint trails
-                    max_val = np.max(colony.grid) + 0.001 # avoid div by zero
-                    norm_grid = np.power(colony.grid, 0.5) / np.power(max_val, 0.5)
-                    
-                    # 2. Apply a colormap (e.g., 'magma', 'inferno', 'plasma', 'viridis')
-                    # cm.magma(grid) returns (Width, Height, 4) -> RGBA floats 0.0-1.0
-                    colored_grid = cm.magma(norm_grid) 
-                    
-                    # 3. Convert to 0-255 uint8 for Pygame
-                    # We drop the Alpha channel ([:, :, :3])
-                    surf_array = (colored_grid[:, :, :3] * 255).astype(np.uint8)
-                    
-                    # 4. Blit
-                    surface = pygame.surfarray.make_surface(surf_array)
-                    surface = pygame.transform.scale(surface, (WIDTH, HEIGHT))
-                    screen.blit(surface, (0, 0))
-                    
-                    pygame.display.flip()
-        pygame.display.set_caption(f"Ants: {NUM_ANTS} | FPS: {clock.get_fps():.1f}")
-        clock.tick(60) # Limit to 60 FPS
+        # 1. Normalize the grid for the colormap (0.0 to 1.0)
+        # Handle both positive and negative values
+        if ENABLE_PREDATORS:
+            # Split into positive and negative components
+            pos_grid = np.maximum(0, colony.grid)
+            neg_grid = np.abs(np.minimum(0, colony.grid))
+
+            # Normalize each separately
+            max_pos = np.max(pos_grid) + 0.001
+            max_neg = np.max(neg_grid) + 0.001
+
+            norm_pos = np.power(pos_grid, 0.5) / np.power(max_pos, 0.5)
+            norm_neg = np.power(neg_grid, 0.5) / np.power(max_neg, 0.5)
+
+            # Create color: magma for ants, blue/cyan for predators
+            colored_pos = cm.magma(norm_pos)
+            colored_neg = np.zeros_like(colored_pos)
+            colored_neg[:, :, 2] = norm_neg  # Blue channel for negative
+            colored_neg[:, :, 1] = norm_neg * 0.5  # Slight green for cyan
+
+            # Combine (additive)
+            colored_grid = np.clip(colored_pos + colored_neg, 0, 1)
+        else:
+            # Original visualization
+            max_val = np.max(colony.grid) + 0.001
+            norm_grid = np.power(colony.grid, 0.5) / np.power(max_val, 0.5)
+            colored_grid = cm.magma(norm_grid)
+
+        # 3. Convert to 0-255 uint8 for Pygame
+        surf_array = (colored_grid[:, :, :3] * 255).astype(np.uint8)
+
+        # 4. Blit
+        surface = pygame.surfarray.make_surface(surf_array)
+        surface = pygame.transform.scale(surface, (WIDTH, HEIGHT))
+        screen.blit(surface, (0, 0))
+
+        pygame.display.flip()
+
+    predator_info = f" | Predators: {NUM_PREDATORS}" if ENABLE_PREDATORS else ""
+    pygame.display.set_caption(f"Ants: {NUM_ANTS}{predator_info} | FPS: {clock.get_fps():.1f}")
+    clock.tick(60)  # Limit to 60 FPS
 
     pygame.quit()
 

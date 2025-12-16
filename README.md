@@ -5,6 +5,7 @@
 `python3 -m venv .venv`
 
 `source .venv/bin/activate`
+`venv/Scripts/activate.ps1`
 
 ## Installing the packages
 `pip install -r requirements.txt`
